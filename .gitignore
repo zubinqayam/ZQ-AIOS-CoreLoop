@@ -1,0 +1,9 @@
+# Runtime data
+data/memory.jsonl
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
