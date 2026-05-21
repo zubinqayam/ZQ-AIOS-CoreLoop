@@ -367,4 +367,218 @@ These five principles are **absolute**. No exception at any phase:
 
 ---
 
+---
+
+## Amendment 1 — Phase 2 Enforcement Extensions
+**Authority:** Sponsor-Level Assessment — Phase 1 Completion Audit  
+**Effective Date:** May 21, 2026  
+**Status:** ACTIVE — CI enforcement pending
+
+---
+
+### Part 2.1 — KEYHOLE_BYPASS VIOLATION (P0 — HARD FAIL)
+
+> **KEYHOLE_BYPASS = P0 VIOLATION**
+
+This is the single most important enforcement rule in Phase 2.
+
+| Rule | Severity | CI Action |
+|------|----------|----------|
+| Any provider call NOT routed through KeyholeGateway | **P0** | Hard-fail CI |
+| Any credential fetch outside Keyhole Secure Cache | **P0** | Hard-fail CI |
+| Any debug/test provider path that bypasses Keyhole | **P0** | Hard-fail CI |
+| Any hardcoded API key or token in source code | **P0** | Hard-fail CI |
+| `KEYHOLE_BYPASS = True` flag or equivalent | **P0** | Reject commit |
+
+**There are no exceptions. There are no temporary debug paths.**
+
+The moment a bypass appears:
+- Auditability dies
+- Attribution dies  
+- Trust boundaries collapse
+- Enterprise compliance fails
+
+**Enforcement rule:** Any function, module, or import path that provides direct provider access without routing through `KeyholeGateway.route_request()` constitutes a bypass violation. CI must reject the commit.
+
+---
+
+### Part 2.2 — EventAppender Write Integrity Rules
+
+The EventAppender is the single most critical runtime component. If it fails, the entire audit and replay chain collapses.
+
+#### Mandatory Guarantees
+
+| Requirement | Enforcement Level | Verification |
+|-------------|------------------|--------------|
+| Append-only writes — no UPDATE, no DELETE | P0 | CI schema check |
+| Strictly monotonic `sequence_id` (atomic integer) | P0 | Replay test suite |
+| Hash-chain continuity (`previous_event_hash`) | P0 | Hash verification test |
+| WAL durability — fsync confirmed before ACK | P0 | Crash recovery test |
+| SHA-256 deterministic event IDs | P0 | Determinism test matrix |
+| HMAC signing on every event envelope | P0 | Tamper detection test |
+| Single-writer enforcement — no concurrent writers | P0 | Concurrency stress test |
+| Bounded micro-batch window ≤ 2ms | P1 | Latency monitoring |
+| Max batch size ≤ 64 events per transaction | P1 | Load test |
+
+#### Prohibited Patterns
+
+- `await sqlite.execute(...)` directly from agent coroutines — **PROHIBITED**
+- Multiple concurrent SQLite connections to the WAL — **PROHIBITED**
+- Acknowledgment issued before fsync confirmation — **PROHIBITED**
+- Timestamp-based replay ordering — **PROHIBITED** (use `sequence_id` only)
+- Adaptive queue-depth batching — **PROHIBITED** (use fixed latency-window batching)
+
+#### Canonical Event Dispatch States
+
+| State | Meaning | Durable? |
+|-------|---------|----------|
+| `DISPATCHED` | In memory queue, not yet written | No |
+| `APPENDED` | WAL write complete, fsync confirmed | Yes |
+| `VERIFIED` | Hash-chain integrity confirmed | Yes |
+| `REPLAYABLE` | Official canonical truth | Yes |
+
+**Crash Recovery Rule:** After any restart, the ReplayEngine reconstructs ONLY from `APPENDED`/`VERIFIED` events. `DISPATCHED` events that were not fsynced **never existed canonically.**
+
+---
+
+### Part 2.3 — Orchestration Backpressure States (Runtime Governor)
+
+The Taskmaster MUST observe queue health and enforce orchestration backpressure. Silent queue overflow is a P0 violation.
+
+| State | Trigger Condition | Orchestration Behavior |
+|-------|------------------|------------------------|
+| `NORMAL` | queue_depth < 50% | Full agent fanout |
+| `DEGRADED` | queue_depth 50–75% | Reduced agent fanout |
+| `THROTTLED` | queue_depth 75–90% | Delay non-critical agents |
+| `CRITICAL` | queue_depth > 90% | Reject new orchestration |
+| `RECOVERY` | Post-crash, replaying WAL | Replay-only mode |
+
+**Rule:** Queue overflow → orchestration slowdown. Never queue overflow → crash.
+
+---
+
+### Part 2.4 — KeyholeGateway Two-Tier Policy Rules
+
+#### Tier 1 — Hot Path Cache (inline)
+
+| Attribute | Requirement |
+|-----------|-------------|
+| Target latency | < 2ms |
+| Contents | provider scope, token validity, route permissions |
+| Eviction | Push-based on policy change event (NOT TTL-only) |
+
+#### Tier 2 — Async Governance Validation (background)
+
+| Attribute | Requirement |
+|-----------|-------------|
+| Execution | Background task, never blocking live calls |
+| Contents | Deep compliance checks, anomaly analysis, ALGA enrichment |
+
+#### Credential Lifecycle Rule
+
+Credentials MUST follow this flow:
+
+```
+Vault → Keyhole Secure Cache → Short-lived Runtime Token → Provider Call
+```
+
+Credential fetching MUST occur:
+- At session initialization
+- During scheduled rotation
+- During cache refresh triggered by revocation event
+
+Credential fetching MUST NOT occur:
+- Inline during live orchestration dispatch
+- On every provider call
+- In response to provider timeout without circuit breaker
+
+#### Revocation Rule
+
+TTL expiration alone is INSUFFICIENT for enterprise governance. The system MUST implement push-based revocation invalidation:
+
+```
+Enterprise Policy Change → Keyhole Revocation Event → Immediate Cache Purge → Runtime Token Invalidation
+```
+
+---
+
+### Part 2.5 — ReplayEngine v1 Capability Constraints
+
+#### Must Support in v1
+
+| Capability | Mandatory |
+|------------|-----------|
+| Sequential replay | Yes |
+| Deterministic replay | Yes |
+| Time-window replay | Yes |
+| Failure reconstruction | Yes |
+| Hash-chain verification | Yes |
+| Sequence-gap detection | Yes |
+
+#### Explicitly Prohibited in v1
+
+Do NOT implement until Phase 3:
+- Branching replay
+- Speculative replay
+- Distributed replay merge
+- Causal graph replay
+- Probabilistic reconstruction
+
+**Reason:** These will collapse complexity before deterministic baseline is proven.
+
+---
+
+### Part 2.6 — CI-Blocking Chaos Injection Requirements
+
+The following failure scenarios MUST be simulated in the mandatory pytest suite BEFORE any overlay or enterprise federation work begins:
+
+#### EventAppender Chaos Tests
+
+| Test | CI Blocking? |
+|------|--------------|
+| 100 concurrent producers flood queue simultaneously | Yes |
+| Power loss mid-fsync simulation | Yes |
+| WAL truncation mid-transaction | Yes |
+| Partial transaction commit | Yes |
+| Hash-chain corruption injection | Yes |
+| Duplicate append handling | Yes |
+| Kill-Writer test: crash writer mid-queue, restart, verify hash-chain self-heals | Yes |
+
+#### ReplayEngine Chaos Tests
+
+| Test | CI Blocking? |
+|------|--------------|
+| Deterministic replay verification (same input → same output) | Yes |
+| Sequence-gap detection | Yes |
+| Hash-chain validation across full WAL | Yes |
+| Ordering invariance under concurrent appends | Yes |
+
+#### KeyholeGateway Chaos Tests
+
+| Test | CI Blocking? |
+|------|--------------|
+| Cache eviction storm | Yes |
+| Token rotation race | Yes |
+| Policy cache miss flood | Yes |
+| Provider timeout with circuit breaker | Yes |
+| Revoked credential replay attempt | Yes |
+
+---
+
+## Summary: Phase 2 Non-Negotiables (Amendment 1)
+
+1. **KEYHOLE_BYPASS is a P0 hard-fail.** No exceptions. No debug paths.
+2. **EventAppender uses single-writer + bounded micro-batch windows.** Never concurrent writes.
+3. **Acknowledgment occurs AFTER WAL fsync.** Never before.
+4. **Replay order is `sequence_id` only.** Never timestamp.
+5. **Backpressure propagates upward.** Never overflow → crash.
+6. **Revocation is push-based.** Never TTL-only.
+7. **Chaos injection suite is CI-blocking.** Must pass before Phase 3.
+
+---
+
+**Amendment Authority:** Zubin Qayam, ZQ AI LOGIC™  
+**Amendment Date:** May 21, 2026  
+**Supersedes:** None — extends CONTRACT_COMPLIANCE.md v1.0.0
+
 © 2026 Zubin Qayam. All rights reserved. ZQ AI LOGIC™
