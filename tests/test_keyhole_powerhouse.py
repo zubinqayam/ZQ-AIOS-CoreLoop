@@ -1,4 +1,3 @@
-import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -20,8 +19,8 @@ class FakeSearchAdapter:
         }
 
 
-class KeyholePowerhouseTests(unittest.TestCase):
-    def setUp(self):
+class KeyholePowerhouseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         self.store = InMemorySecretStore()
         self.keybox = SimpleKeyBox(self.store)
         locker = self.keybox.connect_api_key(
@@ -34,12 +33,12 @@ class KeyholePowerhouseTests(unittest.TestCase):
         self.gateway = KeyholePowerhouse(self.keybox)
         self.gateway.register_provider("search_api", FakeSearchAdapter())
 
-    def test_listing_never_returns_secret(self):
+    async def test_listing_never_returns_secret(self):
         listing = self.keybox.list_lockers()
         self.assertNotIn("super-secret-test-key", repr(listing))
         self.assertIn("secret_fingerprint", listing[0])
 
-    def test_open_execute_receipt_and_redaction(self):
+    async def test_open_execute_receipt_and_redaction(self):
         grant = self.gateway.open(
             locker_id=self.locker_id,
             subject_id="sohar_autotechserv_prospects",
@@ -47,13 +46,11 @@ class KeyholePowerhouseTests(unittest.TestCase):
             ttl_seconds=300,
             request_budget=2,
         )
-        result = asyncio.run(
-            self.gateway.execute(
-                grant_id=grant["grant_id"],
-                task_type="public_business_research",
-                requested_capability="search.public",
-                payload={"query": "automotive workshops Sohar Oman"},
-            )
+        result = await self.gateway.execute(
+            grant_id=grant["grant_id"],
+            task_type="public_business_research",
+            requested_capability="search.public",
+            payload={"query": "automotive workshops Sohar Oman"},
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["receipt"]["authorization_result"], "ALLOWED")
@@ -64,19 +61,17 @@ class KeyholePowerhouseTests(unittest.TestCase):
             ["https://example.com/source"],
         )
 
-    def test_capability_outside_grant_is_denied(self):
+    async def test_capability_outside_grant_is_denied(self):
         grant = self.gateway.open(
             locker_id=self.locker_id,
             subject_id="sohar_autotechserv_prospects",
             capabilities=["search.public"],
         )
-        result = asyncio.run(
-            self.gateway.execute(
-                grant_id=grant["grant_id"],
-                task_type="send_email",
-                requested_capability="email.send",
-                payload={"to": "x@example.com"},
-            )
+        result = await self.gateway.execute(
+            grant_id=grant["grant_id"],
+            task_type="send_email",
+            requested_capability="email.send",
+            payload={"to": "x@example.com"},
         )
         self.assertFalse(result["ok"])
         self.assertIn(
@@ -84,24 +79,22 @@ class KeyholePowerhouseTests(unittest.TestCase):
             result["receipt"]["authorization_result"],
         )
 
-    def test_revoke_locker_blocks_execution(self):
+    async def test_revoke_locker_blocks_execution(self):
         grant = self.gateway.open(
             locker_id=self.locker_id,
             subject_id="sohar_autotechserv_prospects",
             capabilities=["search.public"],
         )
         self.keybox.revoke(self.locker_id)
-        result = asyncio.run(
-            self.gateway.execute(
-                grant_id=grant["grant_id"],
-                task_type="public_business_research",
-                requested_capability="search.public",
-                payload={"query": "Sohar"},
-            )
+        result = await self.gateway.execute(
+            grant_id=grant["grant_id"],
+            task_type="public_business_research",
+            requested_capability="search.public",
+            payload={"query": "Sohar"},
         )
         self.assertFalse(result["ok"])
 
-    def test_oauth_expiry_moves_locker_to_expired(self):
+    async def test_oauth_expiry_moves_locker_to_expired(self):
         oauth = self.keybox.connect_oauth(
             provider="google_drive",
             label="Workspace Read",
